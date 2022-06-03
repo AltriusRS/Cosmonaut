@@ -87,8 +87,10 @@ class HTTPAnnouncer {
     async connect(tracker, isPoll) {
         let payload = this.buildAnnounceRequest(isPoll)
         try {
-            let {data} = await axios.get(tracker + payload)
-            fs.writeFileSync(tracker.split("/")[2]+".bincode", data)
+            let {data} = await axios.get(tracker + payload, {
+                responseType: 'arraybuffer'
+            })
+            fs.writeFileSync(tracker.split("/")[2]+".bincode", data.toString("hex"))
 
             let decoded = bencode.decode(data);
             if (decoded["failure reason"]) {
@@ -121,7 +123,7 @@ class HTTPAnnouncer {
         let pollSuffix = "&event=started";
         if (isPoll) pollSuffix = "";
 
-        return `?compact=0&info_hash=${hash}&peer_id=${encodeURIComponent(util.genHTTPId())}&port=${port}&uploaded=0&downloaded=0&left=${encodeURIComponent(s)}` + pollSuffix
+        return `?compact=1&info_hash=${hash}&peer_id=${encodeURIComponent(util.genHTTPId())}&port=${port}&uploaded=0&downloaded=0&left=${encodeURIComponent(s)}` + pollSuffix
     }
 }
 
