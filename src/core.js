@@ -16,14 +16,14 @@ async function main() {
                     await engine.connect();
                     await engine.waitForEnd();
                 } else {
-                    console.log(`[WARN] Osiris cannot download multi-file torrents at this time - ${testFiles[i]}`)
+                    console.log(`[WARN] Cosmonaut cannot download multi-file torrents at this time - ${testFiles[i]}`)
                 }
             } else {
-                console.log(`[WARN] File ${testFiles[i]} may be improperly formatted. Osiris was unable to parse.`)
+                console.log(`[WARN] File ${testFiles[i]} may be improperly formatted. Cosmonaut was unable to parse.`)
                 console.log(torrentData)
             }
         } else {
-            console.log(`[WARN] File ${testFiles[i]} may be improperly formatted or corrupt. Osiris was unable to parse.`)
+            console.log(`[WARN] File ${testFiles[i]} may be improperly formatted or corrupt. Cosmonaut was unable to parse.`)
         }
     }
 }
