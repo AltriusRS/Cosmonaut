@@ -1,5 +1,5 @@
 const Buffer = require('buffer').Buffer;
-const torrentParser = require('./filesystem.js');
+const torrentParser = require('./torrent-parser.js');
 const util = require("./util.js");
 
 module.exports.buildHandshake = torrent => {

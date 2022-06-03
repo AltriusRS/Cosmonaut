@@ -1,13 +1,131 @@
 const crypto = require('crypto');
+const axios = require("axios");
 const dgram = require('dgram');
 const Buffer = require('buffer').Buffer;
 const urlParse = require('url').parse;
+const bencode = require("bencode");
 
-
-const filesystem = require("../filesystem.js");
+const filesystem = require("../torrent-parser.js");
 const util = require("../util.js");
+const fs = require("fs");
 
 class Announcer {
+    constructor(parent) {
+        this.torrent = parent;
+        this.peers = [];
+        this.leechers = 0;
+        this.seeders = 0;
+        this.announces = new Map();
+    }
+
+    async announce(isPoll) {
+        await this.announceToTracker(this.torrent.announce, isPoll);
+        for (let i = 0; i < this.torrent.announceList.length; i++) {
+            await this.announceToTracker(this.torrent.announceList[i], isPoll);
+        }
+    }
+
+
+    async announceToTracker(tracker, isPoll) {
+        let url = urlParse(tracker);
+        if (this.announces.has(tracker)) {
+            console.log("Tracker already connected")
+            let announcer = this.announces.get(tracker);
+
+            if (url.protocol === "udp:") {
+                console.log(`[DEBUG] Announcing presence to ${tracker}`)
+                const announceReq = announcer.buildAnnounceRequest(announcer.conn.connectionId, announcer.torrent);
+                await announcer.send(announceReq, url);
+                this.peers = this.peers.concat(announcer.peers);
+                this.seeders += announcer.seeders;
+                this.leechers += announcer.leechers;
+            } else if (url.protocol === "http:" || url.protocol === "https:") {
+                console.log("[DEBUG] Announcing to HTTP/s Tracker: " + tracker)
+                await announcer.connect(tracker, isPoll);
+                this.peers = this.peers.concat(announcer.peers);
+                this.seeders += announcer.seeders;
+                this.leechers += announcer.leechers;
+            }
+        } else {
+            if (url.protocol === "udp:") {
+                console.log("[DEBUG] Connecting to UDP Tracker: " + tracker)
+                let announcer = new UDPAnnouncer(this.torrent);
+                let connectPayload = announcer.buildConnectPayload();
+                console.log(`[DEBUG] Announcing presence to ${tracker}`)
+                await announcer.send(connectPayload, url);
+                this.peers = this.peers.concat(announcer.peers);
+                this.seeders += announcer.seeders;
+                this.leechers += announcer.leechers;
+                this.announces.set(tracker, announcer);
+            } else if (url.protocol === "http:" || url.protocol === "https:") {
+                console.log("[DEBUG] Connecting to HTTP/s Tracker: " + tracker)
+                let announcer = new HTTPAnnouncer(this.torrent);
+                await announcer.connect(tracker);
+                this.peers = this.peers.concat(announcer.peers);
+                this.seeders += announcer.seeders;
+                this.leechers += announcer.leechers;
+                this.announces.set(tracker, announcer);
+            } else {
+                console.log("[DEBUG] Skipping unsupported tracker: " + tracker)
+            }
+        }
+        let peers = this.peers;
+        this.peers = peers.filter(function (elem, pos) {
+            return peers.indexOf(elem) == pos;
+        })
+    }
+}
+
+class HTTPAnnouncer {
+    constructor(parent) {
+        this.peers = [];
+        this.torrent = parent;
+        this.leechers = 0;
+        this.seeders = 0;
+    }
+
+    async connect(tracker, isPoll) {
+        let payload = this.buildAnnounceRequest(isPoll)
+        try {
+            let {data} = await axios.get(tracker + payload)
+            fs.writeFileSync(tracker.split("/")[2]+".bincode", data)
+
+            let decoded = bencode.decode(data);
+            if (decoded["failure reason"]) {
+                console.log(tracker + payload)
+                console.log("[DEBUG] Tracker rejected query because:", decoded["failure reason"].toString());
+            } else {
+                console.log(decoded);
+            }
+        } catch (e) {
+            console.log("[DEBUG] Tracker connection resulted in an error.");
+            console.log(e);
+        }
+    }
+
+    buildAnnounceRequest(torrent, port = 6881, isPoll = false) {
+        let hash = filesystem.infoHash(this.torrent).toString('hex')
+
+        hash = hash.replace(/.{2}/g, function (m) {
+            var v = parseInt(m, 16);
+            if (v <= 127) {
+                m = encodeURIComponent(String.fromCharCode(v));
+                if (m[0] === '%')
+                    m = m.toLowerCase();
+            } else
+                m = '%' + m;
+            return m;
+        });
+        let s = filesystem.size(this.torrent).readUInt32BE();
+
+        let pollSuffix = "&event=started";
+        if (isPoll) pollSuffix = "";
+
+        return `?compact=0&info_hash=${hash}&peer_id=${encodeURIComponent(util.genHTTPId())}&port=${port}&uploaded=0&downloaded=0&left=${encodeURIComponent(s)}` + pollSuffix
+    }
+}
+
+class UDPAnnouncer {
     constructor(parent) {
         this.socket = dgram.createSocket('udp4');
         this.peers = [];
@@ -17,16 +135,19 @@ class Announcer {
 
         this.socket.on("message", async (response, rinfo) => {
             let parsed = this.responseType(response);
-            // console.log(`[DEBUG] ${parsed} received from tracker ${rinfo.address}:${rinfo.port}`)
             if (parsed === 'connect') {
-                let conn = this.parseConnectionResponse(response)
-                const announceReq = this.buildAnnounceRequest(conn.connectionId, this.torrent);
-                this.send(announceReq, {port: rinfo.port, hostname: rinfo.address});
+                this.conn = this.parseConnectionResponse(response)
+                const announceReq = this.buildAnnounceRequest(this.conn.connectionId, this.torrent);
+                this.socket.send(announceReq, rinfo.port, rinfo.address, () => {
+                })
             } else if (parsed === 'announce') {
                 const announceResp = this.parseAnnounceResponse(response);
                 this.peers = this.peers.concat(announceResp.peers);
                 this.leechers += announceResp.leechers;
                 this.seeders += announceResp.seeders;
+                this.resolveWhenPeers()
+            } else {
+                console.log(parsed)
             }
         });
     }
@@ -35,33 +156,18 @@ class Announcer {
         const action = resp.readUInt32BE(0);
         if (action === 0) return 'connect';
         if (action === 1) return 'announce';
+        if (action === 2) return 'scrape';
+        if (action === 3) return 'error';
     }
 
-
-    async announce() {
-        await this.announceToTracker(this.torrent.announce);
-        for (let i = 0; i < this.torrent.announceList.length; i++) {
-            await this.announceToTracker(this.torrent.announceList[i]);
-        }
-    }
-
-
-    async announceToTracker(tracker) {
-        let url = urlParse(tracker);
-        if (url.protocol === "udp:") {
-            let connectPayload = this.buildConnectPayload();
-            // console.log(`[DEBUG] Announcing presence to ${tracker}`)
-            let x = await this.send(connectPayload, url);
-        } else {
-            // console.log("[DEBUG] Skipping unsupported tracker: " + tracker)
-        }
-
-        return []
-    }
 
     async send(message, url) {
         return new Promise((resolve) => {
-            this.socket.send(message, url.port, url.hostname, resolve)
+            this.resolveWhenPeers = () => {
+                resolve()
+            };
+            this.socket.send(message, url.port, url.hostname, () => {
+            })
         })
     }
 
@@ -123,7 +229,6 @@ class Announcer {
         return buf;
     }
 
-
     parseAnnounceResponse(resp) {
         function group(iterable, groupSize) {
             let groups = [];
@@ -148,4 +253,5 @@ class Announcer {
     }
 }
 
-module.exports = Announcer;
+module.exports = {UDPAnnouncer, HTTPAnnouncer, Announcer};
+

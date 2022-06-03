@@ -1,67 +1,87 @@
-const Announcer = require("./Announcer");
+const {Announcer} = require("./Announcer");
 const Peer = require("./Peer");
 const fs = require("fs");
 const Pieces = require('./Pieces');
 
 class TorrentEngine {
-    constructor(torrent) {
+    constructor({torrent}) {
+        this.state = "pending";
+        this.started = false;
         this.torrent = torrent;
         this.announcer = new Announcer(this.torrent);
         this.connections = new Map();
+        this.lastPolled = Date.now();
+        this.ignore = []
     }
 
-    async getPeers() {
+    async getPeers(isPoll) {
         return new Promise(async (resolve) => {
-            await this.announcer.announce();
+            this.state = "fetching peers";
+            await this.announcer.announce(isPoll);
+            this.lastPolled = Date.now();
             setTimeout((parent) => {
+                this.state = "pending";
                 resolve(parent.announcer.peers);
-            }, 500, this)
+            }, 2000, this)
         })
     }
 
-    async connect() {
-        let peers = await this.getPeers()
-        const pieces = new Pieces(this.torrent);
-        const file = fs.openSync(this.torrent.info.name, 'w');
-        for (let i = 0; i < peers.length; i++) {
-            let rawpeer = peers[i];
-            let name = `${rawpeer.ip}:${rawpeer.port}`
-            if (!this.connections.has(name)) {
-                let peer = new Peer(rawpeer, this.torrent, pieces, file);
-                peer.on("error", e => {
-                    if (e.code !== "ECONNREFUSED" && e.code !== "ETIMEDOUT") {
-                        console.log(e)
-                    } else {
-                        // console.log(`[DEBUG] Unable to connect to peer: ${name}`)
-                    }
-                    this.connections.delete(name);
-                });
-                peer.on("end", e => {
-                    // console.log("[DEBUG] Peer connection ended.", name)
-                    this.connections.delete(name);
-                })
-                this.connections.set(name, peer);
+    async connect(isPoll) {
+        let peers = await this.getPeers(isPoll)
+        if (peers.length > 0) {
+            const pieces = new Pieces(this.torrent);
+            const file = fs.openSync(this.torrent.info.name, 'w');
+            if(!isPoll) {
+                this.state = "starting";
+            } else this.state = "Checking peers"
+
+            for (let i = 0; i < peers.length; i++) {
+                let rawpeer = peers[i];
+                let name = `${rawpeer.ip}:${rawpeer.port}`
+                if (!this.connections.has(name) && this.ignore.includes(name)) {
+                    let peer = new Peer(rawpeer, this.torrent, pieces, file);
+                    peer.on("error", e => {
+                        if (e.code !== "ECONNREFUSED" && e.code !== "ETIMEDOUT") {
+                            console.log(e)
+                        }
+                        this.connections.delete(name);
+                        this.ignore.push(name);
+                    });
+                    peer.on("end", e => {
+                        console.log("[DEBUG] Peer connection ended.", name)
+                        this.connections.delete(name);
+                        this.ignore.push(name);
+                    })
+                    this.connections.set(name, peer);
+                }
+            }
+            if(peers.length === 0) {
+                this.state = "stalled";
             }
         }
     }
 
+    async poll() {
+        let bytesRead = this.bytesRead;
+        if (Date.now() - this.lastPolled > 1000 * 30) {
+            await this.connect();
+            this.lastPolled = Date.now();
+        }
 
-    async waitForEnd() {
-        return new Promise(async(resolve) => {
-            let framecount = 50;
-            let frames = 0;
-            let frametimeMS = 500;
-            while(this.connections.size > 0) {
-                await sleep(frametimeMS)
-                frames += 1;
-                if(frames >= framecount) {
-                    frames = 0;
-                    await this.connect();
-                }
-                process.stdout.write(`\r[INFO] ${this.torrent.torrentFile} | ${this.connections.size} peer(s) | ${this.announcer.leechers} leechers | polling peers in ${((frametimeMS*(framecount-frames))/1000).toFixed(2)}s`)
-            }
-            resolve();
-        })
+        this.bytesRead = 0;
+
+        return {
+            state: this.state,
+            finished: this.connections.size > 0,
+            connections: this.connections.size,
+            peers: this.announcer.peers.length,
+            seeders: this.announcer.seeders,
+            leechers: this.announcer.leechers,
+            downloaded: 0,
+            uploaded: "N/A",
+            writingTo: this.torrent.info.name,
+            downSpeed: bytesRead
+        }
     }
 }
 

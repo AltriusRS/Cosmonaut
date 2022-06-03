@@ -3,15 +3,17 @@
 A WIP pure JS implementation of the BitTorrent protocol, based on work by [@allenkim67](https://github.com/allenkim67)<sup>[1]</sup>. 
 
 TODO:
-
+- [ ] HTTP/S Trackers* <- WIP
 - [ ] Multi-file downloads
 - [ ] Torrent management
 - [ ] Completion detection
 - [ ] Seeding support
 - [ ] Quick resume
-- [ ] Concurrent download support
+- [ ] Concurrent download support <- WIP
 - [ ] User preference management
 - [ ] Any kind of usable UI
+
+*HTTP tracking is partially implemented, the core is there but the resulting buffer is, malformed? unsure, need to debug.
 
 Plans:
 
